@@ -60,6 +60,8 @@ public:
 
 	glm::mat4x4 getHMDMatrixProjectionEye(vr::Hmd_Eye nEye);
 	glm::mat4x4 getHMDMatrixPoseEye(vr::Hmd_Eye nEye);
+	glm::mat4x4 getHMDMatrixPoseHMD();
+
 	glm::mat4x4 getCurrentViewProjectionMatrix(vr::Hmd_Eye nEye);
 	glm::mat4x4 getCurrentProjectionMatrix(vr::Hmd_Eye nEye);
 	glm::mat4x4 getCurrentViewMatrix(vr::Hmd_Eye nEye);
@@ -81,6 +83,8 @@ public:
 	void showGrid(float transitionDuration = 2.0f);
 	void hideGrid(float transitionDuration = 2.0f);
 
+	void sendHaptics(int controllerIndex, int axis, unsigned short durationMicros);
+	void longVibration(float length, float strength);
 	ofEvent<ofxOpenVRControllerEventArgs> ofxOpenVRControllerEvent;
 	glm::mat4x4 getmat4HMDPose();
 

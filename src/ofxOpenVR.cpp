@@ -183,6 +183,12 @@ glm::mat4x4 ofxOpenVR::getHMDMatrixPoseEye(vr::Hmd_Eye nEye)
 	return glm::inverse(matrixObj);
 }
 
+glm::mat4x4 ofxOpenVR::getHMDMatrixPoseHMD()
+{
+
+	return _rmat4DevicePose[vr::k_unTrackedDeviceIndex_Hmd];
+}
+
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::getCurrentViewProjectionMatrix(vr::Hmd_Eye nEye)
 {
@@ -252,6 +258,7 @@ bool ofxOpenVR::isControllerConnected(vr::ETrackedControllerRole nController)
 	if (_pHMD) {
 		if (_iTrackedControllerCount > 0) {
 			if (nController == vr::TrackedControllerRole_LeftHand) {
+			
 				return _pHMD->IsTrackedDeviceConnected(_leftControllerDeviceID);
 			}
 			else if (nController == vr::TrackedControllerRole_RightHand) {
@@ -322,6 +329,17 @@ void ofxOpenVR::hideGrid(float transitionDuration)
 		vr::VRCompositor()->FadeGrid(transitionDuration, _bIsGridVisible);
 	}
 }
+
+void ofxOpenVR::sendHaptics(int controllerIndex, int axis, unsigned short durationMicros)
+{
+
+
+
+		_pHMD->TriggerHapticPulse(controllerIndex, axis, durationMicros);
+	
+}
+
+
 
 //--------------------------------------------------------------
 bool ofxOpenVR::init()
@@ -990,7 +1008,7 @@ void ofxOpenVR::renderStereoTargets()
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
 	glClearColor(_clearColor.r, _clearColor.g, _clearColor.b, _clearColor.a);
-	//glEnable(GL_MULTISAMPLE);
+	glEnable(GL_MULTISAMPLE);
 
 	// Right Eye
 	glBindFramebuffer(GL_FRAMEBUFFER, rightEyeDesc._nRenderFramebufferId);
