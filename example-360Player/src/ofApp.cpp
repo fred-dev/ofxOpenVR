@@ -1,3 +1,4 @@
+//Modified example for panoramic player by Kuflex, 2017
 // Thanks to @num3ric for sharing this:
 // http://discourse.libcinder.org/t/360-vr-video-player-for-ios-in-cinder/294/6
 
@@ -6,16 +7,12 @@
 //--------------------------------------------------------------
 void ofApp::setup(){
 	ofSetVerticalSync(false);
-	ofDisableArbTex();
+	ofDisableArbTex(); //required for using "sampler2D" instead "sampler2DRect" in shaders
 
 	// We need to pass the method we want ofxOpenVR to call when rending the scene
 	openVR.setup(std::bind(&ofApp::render, this, std::placeholders::_1));
 
-	image.load("DSCN0143.JPG");
-	shader.load("sphericalProjection");
-
-	sphere.set(10, 10);
-	sphere.setPosition(glm::vec3(.0f, .0f, .0f));
+	pano.setup(openVR, "DSCN0143.JPG");
 
 	bShowHelp = true;
 }
@@ -28,13 +25,15 @@ void ofApp::exit() {
 //--------------------------------------------------------------
 void ofApp::update(){
 	openVR.update();
+	openVR.render();
 }
 
 //--------------------------------------------------------------
 void ofApp::draw(){
-	openVR.render();
-	openVR.renderDistortion();
-
+	//openVR.renderDistortion();
+	openVR.renderScene(vr::Eye_Left);
+	//openVR.draw_using_contrast_shader(ofGetWidth(), ofGetHeight());
+	
 	openVR.drawDebugInfo(10.0f, 500.0f);
 
 	// Help
@@ -51,22 +50,11 @@ void ofApp::draw(){
 //--------------------------------------------------------------
 void  ofApp::render(vr::Hmd_Eye nEye) {
 
-	ofPushView();
-	ofSetMatrixMode(OF_MATRIX_PROJECTION);
-	ofLoadMatrix(openVR.getCurrentProjectionMatrix(nEye));
-	ofSetMatrixMode(OF_MATRIX_MODELVIEW);
-	ofMatrix4x4 currentViewMatrixInvertY = openVR.getCurrentViewMatrix(nEye);
-	currentViewMatrixInvertY.scale(1.0f, -1.0f, 1.0f);
-	ofLoadMatrix(currentViewMatrixInvertY);
+	openVR.pushMatricesForRender(nEye);
 
-	ofSetColor(ofColor::white);
+	pano.draw();
 
-	shader.begin();
-	shader.setUniformTexture("tex0", image, 1);
-	sphere.draw();
-	shader.end();
-
-	ofPopView();
+	openVR.popMatricesForRender();
 
 }
 
@@ -137,6 +125,6 @@ void ofApp::dragEvent(ofDragInfo dragInfo) {
 	std::string path = dragInfo.files[0];
 	std::replace(path.begin(), path.end(), '\\', '/');
 
-	image.load(path);
-	image.update();
+	pano.image().load(path);
+	pano.image().update();
 }

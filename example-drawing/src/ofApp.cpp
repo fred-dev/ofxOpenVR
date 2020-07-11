@@ -7,7 +7,7 @@ void ofApp::setup(){
 	ofSetVerticalSync(false);
 
 	bShowHelp = true;
-	bUseShader = true;
+	bUseShader = true;		//Rendering with and without shaders should give the same result, so check it by pressing Space
 	bIsLeftTriggerPressed = false;
 	bIsRightTriggerPressed = false;
 
@@ -18,8 +18,6 @@ void ofApp::setup(){
 	// We need to pass the method we want ofxOpenVR to call when rending the scene
 	openVR.setup(std::bind(&ofApp::render, this, std::placeholders::_1));
 	openVR.setDrawControllers(true);
-
-	ofAddListener(openVR.ofxOpenVRControllerEvent, this, &ofApp::controllerEvent);
 
 	// Vertex shader source
 	string vertex;
@@ -53,19 +51,22 @@ void ofApp::setup(){
 
 //--------------------------------------------------------------
 void ofApp::exit(){
-	ofRemoveListener(openVR.ofxOpenVRControllerEvent, this, &ofApp::controllerEvent);
-
 	openVR.exit();
 }
 
 //--------------------------------------------------------------
 void ofApp::update(){
 	openVR.update();
+	while (openVR.hasControllerEvents()) {
+		ofxOpenVRControllerEvent event;
+		openVR.getNextControllerEvent(event);
+		controllerEvent(event);
+	}
 
 	if (bIsLeftTriggerPressed) {
-		if (openVR.isControllerConnected(vr::TrackedControllerRole_LeftHand)) {
+		if (openVR.isControllerConnected(0)) {
 			// Getting the translation component of the controller pose matrix
-			leftControllerPosition = openVR.getControllerPose(vr::TrackedControllerRole_LeftHand)[3];
+			leftControllerPosition = openVR.getControllerCenter(0);
 
 			if (lastLeftControllerPosition.distance(leftControllerPosition) >= polylineResolution) {
 				leftControllerPolylines[leftControllerPolylines.size() - 1].lineTo(leftControllerPosition);
@@ -75,9 +76,9 @@ void ofApp::update(){
 	}
 
 	if (bIsRightTriggerPressed) {
-		if (openVR.isControllerConnected(vr::TrackedControllerRole_RightHand)) {
+		if (openVR.isControllerConnected(1)) {
 			// Getting the translation component of the controller pose matrix
-			rightControllerPosition = openVR.getControllerPose(vr::TrackedControllerRole_RightHand)[3];
+			rightControllerPosition = openVR.getControllerCenter(1);
 
 			if (lastRightControllerPosition.distance(rightControllerPosition) >= polylineResolution) {
 				rightControllerPolylines[rightControllerPolylines.size() - 1].lineTo(rightControllerPosition);
@@ -85,12 +86,15 @@ void ofApp::update(){
 			}
 		}
 	}
+	
+	openVR.render();
 }
 
 //--------------------------------------------------------------
 void ofApp::draw(){
-	openVR.render();
-	openVR.renderDistortion();
+	//openVR.renderDistortion();
+	openVR.renderScene(vr::Eye_Left);
+	//openVR.draw_using_contrast_shader(ofGetWidth(), ofGetHeight());
 
 	openVR.drawDebugInfo(10.0f, 500.0f);
 
@@ -104,6 +108,8 @@ void ofApp::draw(){
 		_strHelp << "Press the Grip button to clear all the lines drawn with that specific controller." << endl;
 		_strHelp << "Drawing resolution " << polylineResolution << " (press: +/-)." << endl;
 		_strHelp << "Drawing default 3D models " << openVR.getRenderModelForTrackedDevices() << " (press: m)." << endl;
+		_strHelp << "Using shader (' '):  " << ((bUseShader) ? "TRUE" : "FALSE") << endl;
+		
 		ofDrawBitmapStringHighlight(_strHelp.str(), ofPoint(10.0f, 20.0f), ofColor(ofColor::black, 100.0f));
 	}
 }
@@ -128,13 +134,14 @@ void  ofApp::render(vr::Hmd_Eye nEye){
 	}
 	// Loading matrices
 	else {
-		ofPushView();
-		ofSetMatrixMode(OF_MATRIX_PROJECTION);
-		ofLoadMatrix(openVR.getCurrentProjectionMatrix(nEye));
-		ofSetMatrixMode(OF_MATRIX_MODELVIEW);
-		ofMatrix4x4 currentViewMatrixInvertY = openVR.getCurrentViewMatrix(nEye);
-		currentViewMatrixInvertY.scale(1.0f, -1.0f, 1.0f);
-		ofLoadMatrix(currentViewMatrixInvertY);
+		//Prepare matrices for VR rendering
+		//Note, this function also calls openVR.flipVr(), 
+		//so some rendering may be flipped.
+		//For 2D rendering in FBO you can call openVR.flipOf(), 
+		//and then restore the mode back by calling openVR.flipVr().
+		openVR.pushMatricesForRender(nEye);
+
+
 
 		ofSetColor(ofColor::white);
 
@@ -145,13 +152,18 @@ void  ofApp::render(vr::Hmd_Eye nEye){
 		for (auto pl : rightControllerPolylines) {
 			pl.draw();
 		}
-		ofPopView();
+		
+		openVR.popMatricesForRender();
 	}
 }
 
 //--------------------------------------------------------------
-void ofApp::controllerEvent(ofxOpenVRControllerEventArgs& args){
-	//cout << "ofApp::controllerEvent > role: " << ofToString(args.controllerRole) << " - event type: " << ofToString(args.eventType) << " - button type: " << ofToString(args.buttonType) << " - x: " << args.analogInput_xAxis << " - y: " << args.analogInput_yAxis << endl;
+void ofApp::controllerEvent(ofxOpenVRControllerEvent& args){
+	cout << "ofApp::controllerEvent > role: " << ofToString(int(args.controllerRole)) 
+		<< " - event type: " << ofToString(int(args.eventType)) 
+		<< " - button type: " << ofToString(int(args.buttonType))
+		<< " - x: " << args.analogInput_xAxis 
+		<< " - y: " << args.analogInput_yAxis << endl;
 	// Left
 	if (args.controllerRole == ControllerRole::Left) {
 		// Trigger
@@ -245,6 +257,10 @@ void ofApp::keyPressed(int key){
 
 		case 'm':
 			openVR.setRenderModelForTrackedDevices(!openVR.getRenderModelForTrackedDevices());
+			break;
+
+		case ' ':
+			bUseShader = !bUseShader;	//switch shaders. The result should be the same
 			break;
 
 		default:

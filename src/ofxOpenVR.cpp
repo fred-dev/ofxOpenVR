@@ -1,6 +1,9 @@
 #include "ofxOpenVR.h"
+#include "ofGLProgrammableRenderer.h"
 
+#ifndef STRINGIFY
 #define STRINGIFY(A) #A
+#endif
 
 //--------------------------------------------------------------
 // Purpose: Helper to get a string from a tracked device 
@@ -24,15 +27,23 @@ std::string getTrackedDeviceString(vr::IVRSystem *pHmd, vr::TrackedDeviceIndex_t
 //--------------------------------------------------------------
 void ofxOpenVR::setup(std::function< void(vr::Hmd_Eye) > f)
 {
-	
+	isCameraShown = false;
 	// Store the user's callable render function 
 	_callableRenderFunction = f;
 
 	// Initialize vars
 	_bIsGLInit = false;
-	_pHMD = NULL;
-	_pRenderModels = NULL;
-	_bGlFinishHack = true;
+	_pHMD = nullptr;
+
+	trackedCamera = nullptr;
+	trackedCameraHandle = INVALID_TRACKED_CAMERA_HANDLE;
+	m_nCameraFrameWidth = 0;
+	m_nCameraFrameHeight = 0;
+	m_nCameraFrameBufferSize = 0;
+	m_pCameraFrameBuffer = nullptr;
+	frameCounter = 0;
+
+	_pRenderModels = nullptr;
 	_unLensVAO = 0;
 	_iTrackedControllerCount = 0;
 	_leftControllerDeviceID = -1;
@@ -40,8 +51,8 @@ void ofxOpenVR::setup(std::function< void(vr::Hmd_Eye) > f)
 	_iTrackedControllerCount_Last = -1;
 	_iValidPoseCount = 0;
 	_iValidPoseCount_Last = -1;
-	_bDrawControllers = false;
-	_bIsGridVisible = false;
+	_bDrawControllers = true;
+	_bIsGridVisible = true;
 	_clearColor.set(.08f, .08f, .08f, 1.0f);
 	_bRenderModelForTrackedDevices = false;
 
@@ -54,6 +65,10 @@ void ofxOpenVR::setup(std::function< void(vr::Hmd_Eye) > f)
 //--------------------------------------------------------------
 void ofxOpenVR::exit()
 {
+
+	closeVideo();
+	trackedCamera = nullptr;
+
 	if (vr::VRCompositor()->IsMirrorWindowVisible()) {
 		hideMirrorWindow();
 	}
@@ -61,7 +76,7 @@ void ofxOpenVR::exit()
 	if (_pHMD)
 	{
 		vr::VR_Shutdown();
-		_pHMD = NULL;
+		_pHMD = nullptr;
 	}
 
 	for (std::vector< CGLRenderModel * >::iterator i = _vecRenderModels.begin(); i != _vecRenderModels.end(); i++)
@@ -70,6 +85,8 @@ void ofxOpenVR::exit()
 	}
 	_vecRenderModels.clear();
 
+	
+
 	if (_bIsGLInit)
 	{
 		glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_FALSE);
@@ -77,17 +94,8 @@ void ofxOpenVR::exit()
 		glDeleteBuffers(1, &_glIDVertBuffer);
 		glDeleteBuffers(1, &_glIDIndexBuffer);
 
-		glDeleteRenderbuffers(1, &leftEyeDesc._nDepthBufferId);
-		glDeleteTextures(1, &leftEyeDesc._nRenderTextureId);
-		glDeleteFramebuffers(1, &leftEyeDesc._nRenderFramebufferId);
-		glDeleteTextures(1, &leftEyeDesc._nResolveTextureId);
-		glDeleteFramebuffers(1, &leftEyeDesc._nResolveFramebufferId);
-
-		glDeleteRenderbuffers(1, &rightEyeDesc._nDepthBufferId);
-		glDeleteTextures(1, &rightEyeDesc._nRenderTextureId);
-		glDeleteFramebuffers(1, &rightEyeDesc._nRenderFramebufferId);
-		glDeleteTextures(1, &rightEyeDesc._nResolveTextureId);
-		glDeleteFramebuffers(1, &rightEyeDesc._nResolveFramebufferId);
+		eyeFbo[vr::Eye_Left].clear();
+		eyeFbo[vr::Eye_Right].clear();
 
 		if (_unLensVAO != 0)
 		{
@@ -102,14 +110,13 @@ void ofxOpenVR::exit()
 	
 }
 
-
 //--------------------------------------------------------------
 void ofxOpenVR::update()
 {
 	// for now as fast as possible
 	if (_pHMD)
 	{
-		handleInput();
+		handleInput();	//update controller events queue
 		drawControllers();
 	}
 
@@ -124,6 +131,73 @@ void ofxOpenVR::update()
 	}
 
 	updateDevicesMatrixPose();
+
+	frameCounter++;
+	if (true) {
+
+		frameCounter = 0;
+
+		vr::CameraVideoStreamFrameHeader_t frameHeader;
+		vr::EVRTrackedCameraError nCameraError = trackedCamera->GetVideoStreamFrameBuffer(trackedCameraHandle, vr::VRTrackedCameraFrameType_Undistorted, nullptr, 0, &frameHeader, sizeof(frameHeader));
+		if (nCameraError != vr::VRTrackedCameraError_None) return;
+		if (frameHeader.nFrameSequence == m_nLastFrameSequence) {
+			// frame hasn't changed yet, nothing to do
+			return;
+		}
+
+		// Frame has changed, do the more expensive frame buffer copy
+		nCameraError = trackedCamera->GetVideoStreamFrameBuffer(trackedCameraHandle, vr::VRTrackedCameraFrameType_Undistorted, m_pCameraFrameBuffer, m_nCameraFrameBufferSize, &frameHeader, sizeof(frameHeader));
+		if (nCameraError != vr::VRTrackedCameraError_None)
+			return;
+
+		m_nLastFrameSequence = frameHeader.nFrameSequence;
+
+		if (isCameraShown) {
+			cameraImg.setFromPixels(m_pCameraFrameBuffer, m_nCameraFrameWidth, m_nCameraFrameHeight, OF_IMAGE_COLOR_ALPHA);
+		}
+		
+
+		camFbo[vr::Eye_Left].begin();
+		ofClear(0);
+		if (isCameraShown) {
+			ofPushMatrix();
+			ofScale(1, -1, 1);
+			ofTranslate(0, -(int)m_nCameraFrameHeight, 0);
+			cameraImg.draw(0, 0);
+			ofPopMatrix();
+		}
+		camFbo[vr::Eye_Left].end();
+
+		camFbo[vr::Eye_Right].begin();
+		ofClear(0);
+		if (isCameraShown) {
+			ofPushMatrix();
+			ofScale(1, -1, 1);
+			ofTranslate(0, -(int)m_nCameraFrameHeight * 0.5, 0);
+			cameraImg.draw(0, 0);
+			ofPopMatrix();
+		}
+		camFbo[vr::Eye_Right].end();
+
+	}
+}
+
+//--------------------------------------------------------------
+void ofxOpenVR::pushMatricesForRender(vr::Hmd_Eye nEye) {
+	//setFlipVr();
+
+	ofPushView();
+	ofSetMatrixMode(OF_MATRIX_PROJECTION);
+	ofLoadMatrix(getCurrentProjectionMatrix(nEye));
+	ofSetMatrixMode(OF_MATRIX_MODELVIEW);
+	glm::mat4 currentViewMatrixInvertY = getCurrentViewMatrix(nEye);
+	ofLoadMatrix(currentViewMatrixInvertY);
+}
+
+//--------------------------------------------------------------
+void ofxOpenVR::popMatricesForRender() {
+	ofPopView();
+	ofSetOrientation(OF_ORIENTATION_DEFAULT, true);
 }
 
 //--------------------------------------------------------------
@@ -134,20 +208,13 @@ void ofxOpenVR::render()
 	{
 		renderStereoTargets(); 
 
-		vr::Texture_t leftEyeTexture = { (void*)(uintptr_t)leftEyeDesc._nResolveTextureId, vr::TextureType_OpenGL, vr::ColorSpace_Gamma };
+		vr::Texture_t leftEyeTexture = { (void*)(uintptr_t)(eyeFbo[vr::Eye_Left].getTexture().getTextureData().textureID), vr::TextureType_OpenGL, vr::ColorSpace_Gamma };
 		vr::VRCompositor()->Submit(vr::Eye_Left, &leftEyeTexture);
-		vr::Texture_t rightEyeTexture = { (void*)(uintptr_t)rightEyeDesc._nResolveTextureId, vr::TextureType_OpenGL, vr::ColorSpace_Gamma };
+		vr::Texture_t rightEyeTexture = { (void*)(uintptr_t)(eyeFbo[vr::Eye_Right].getTexture().getTextureData().textureID), vr::TextureType_OpenGL, vr::ColorSpace_Gamma };
 		vr::VRCompositor()->Submit(vr::Eye_Right, &rightEyeTexture);
 	}
 
-	if (_bGlFinishHack)
-	{
-		//$ HACKHACK. From gpuview profiling, it looks like there is a bug where two renders and a present
-		// happen right before and after the vsync causing all kinds of jittering issues. This glFinish()
-		// appears to clear that up. Temporary fix while I try to get nvidia to investigate this problem.
-		// 1/29/2014 mikesart
-		glFinish();
-	}
+	glViewport(0, 0, ofGetWidth(), ofGetHeight());
 }
 
 //--------------------------------------------------------------
@@ -156,7 +223,7 @@ glm::mat4x4 ofxOpenVR::getHMDMatrixProjectionEye(vr::Hmd_Eye nEye)
 	if (!_pHMD)
 		return glm::mat4x4();
 
-	vr::HmdMatrix44_t mat = _pHMD->GetProjectionMatrix(nEye, _fNearClip, _fFarClip);
+	vr::HmdMatrix44_t mat = _pHMD->GetProjectionMatrix(nEye, nearClip.get(), farClip.get());
 
 	return glm::mat4x4(
 		mat.m[0][0], mat.m[1][0], mat.m[2][0], mat.m[3][0],
@@ -169,8 +236,7 @@ glm::mat4x4 ofxOpenVR::getHMDMatrixProjectionEye(vr::Hmd_Eye nEye)
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::getHMDMatrixPoseEye(vr::Hmd_Eye nEye)
 {
-	if (!_pHMD)
-		return glm::mat4x4();
+	if (!_pHMD) return glm::mat4x4();
 
 	vr::HmdMatrix34_t matEyeRight = _pHMD->GetEyeToHeadTransform(nEye);
 	glm::mat4x4 matrixObj(
@@ -186,54 +252,25 @@ glm::mat4x4 ofxOpenVR::getHMDMatrixPoseEye(vr::Hmd_Eye nEye)
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::getCurrentViewProjectionMatrix(vr::Hmd_Eye nEye)
 {
-	glm::mat4x4 matMVP;
-	if (nEye == vr::Eye_Left)
-	{
-		matMVP = _mat4ProjectionLeft * _mat4eyePosLeft * _mat4HMDPose;
-	}
-	else if (nEye == vr::Eye_Right)
-	{
-		matMVP = _mat4ProjectionRight * _mat4eyePosRight *  _mat4HMDPose;
-	}
-
-	return matMVP;
+	return _mat4Projection[nEye] * _mat4eyePos[nEye] * _mat4HMDPose;
 }
 
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::getCurrentProjectionMatrix(vr::Hmd_Eye nEye)
 {
-	glm::mat4x4 matP;
-	if (nEye == vr::Eye_Left)
-	{
-		matP = _mat4ProjectionLeft;
-	}
-	else if (nEye == vr::Eye_Right)
-	{
-		matP = _mat4ProjectionRight;
-	}
-
-	return matP;
+	return _mat4Projection[nEye];
 }
 
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::getCurrentViewMatrix(vr::Hmd_Eye nEye)
 {
-	glm::mat4x4 matV;
-	if (nEye == vr::Eye_Left)
-	{
-		matV = _mat4eyePosLeft * _mat4HMDPose;
-	}
-	else if (nEye == vr::Eye_Right)
-	{
-		matV = _mat4eyePosRight *  _mat4HMDPose;
-	}
-
-	return matV;
+	return _mat4eyePos[nEye] * _mat4HMDPose;
 }
 
 //--------------------------------------------------------------
-glm::mat4x4 ofxOpenVR::getControllerPose(vr::ETrackedControllerRole nController)
+glm::mat4x4 ofxOpenVR::getControllerPose(int controller)
 {
+	vr::ETrackedControllerRole nController = toControllerRole(controller);
 	glm::mat4x4 matrix;
 
 	if (nController == vr::TrackedControllerRole_LeftHand) {
@@ -247,8 +284,78 @@ glm::mat4x4 ofxOpenVR::getControllerPose(vr::ETrackedControllerRole nController)
 }
 
 //--------------------------------------------------------------
-bool ofxOpenVR::isControllerConnected(vr::ETrackedControllerRole nController)
+vr::ETrackedControllerRole ofxOpenVR::toControllerRole(int controller) {	//0 - left, 1 - right
+	if (controller == 0) return vr::TrackedControllerRole_LeftHand;
+	if (controller == 1) return vr::TrackedControllerRole_RightHand;
+	return vr::TrackedControllerRole_Invalid;
+}
+
+//--------------------------------------------------------------
+vr::Hmd_Eye ofxOpenVR::toEye(int i) {	//0 - left, 1 - right
+	if (i == 0) return vr::Eye_Left;
+	else return vr::Eye_Right;
+}
+
+//--------------------------------------------------------------
+int ofxOpenVR::toDeviceId(int controller) {
+	return (controller == 0) ? _leftControllerDeviceID : _rightControllerDeviceID;
+}
+
+//--------------------------------------------------------------
+float ofxOpenVR::getTriggerState(int controller) {
+	if (!_pHMD) return 0;
+	int id = toDeviceId(controller);
+	if (_pHMD->IsTrackedDeviceConnected(id)) {
+		vr::VRControllerState_t state;
+		bool res = _pHMD->GetControllerState(id, &state, sizeof(state));
+		if (res) return state.rAxis[1].x;
+		/*cout << "controller " << controller + 1 << " id " << id << "  ";
+		if (!res) {
+			cout << "error" << endl;
+		}
+		else {
+			cout << "packet " << state.unPacketNum
+				<< ", press " << state.ulButtonPressed
+				<< ", touch " << state.ulButtonTouched;
+			cout << "  axis ";
+			for (int j = 0; j < vr::k_unControllerStateAxisCount; j++) {
+				cout << "(" << state.rAxis[j].x << ", " << state.rAxis[j].y << ")";
+			}
+			cout << endl;
+		}*/
+	}
+	return 0;
+}
+
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::getTrackPadState(int controller) {
+	if (!_pHMD) return ofPoint();
+	int id = (controller == 0) ? _leftControllerDeviceID : _rightControllerDeviceID;
+	if (_pHMD->IsTrackedDeviceConnected(id)) {
+		vr::VRControllerState_t state;
+		bool res = _pHMD->GetControllerState(id, &state, sizeof(state));
+		if (res) {
+			bool touched = state.ulButtonTouched & 4294967296;  //this constant is 2^vk::k_EButton_SteamVR_Touchpad
+			//cout << state.ulButtonTouched << endl;
+			if (touched) return glm::vec3(state.rAxis[0].x, state.rAxis[0].y, 0);
+			else return glm::vec3(-1000, -1000, 0);
+		}
+	}
+	return glm::vec3();
+}
+
+
+/** Trigger a single haptic pulse on a controller. After this call the application may not trigger another haptic pulse on this controller
+* and axis combination for 5ms. */
+//virtual void TriggerHapticPulse(vr::TrackedDeviceIndex_t unControllerDeviceIndex, uint32_t unAxisId, unsigned short usDurationMicroSec) = 0;
+
+//https://steamcommunity.com/app/358720/discussions/0/405693392914144440/
+
+
+//--------------------------------------------------------------
+bool ofxOpenVR::isControllerConnected(int controller)
 {
+	vr::ETrackedControllerRole nController = toControllerRole(controller);
 	if (_pHMD) {
 		if (_iTrackedControllerCount > 0) {
 			if (nController == vr::TrackedControllerRole_LeftHand) {
@@ -349,14 +456,16 @@ bool ofxOpenVR::init()
 		sprintf_s(buf, sizeof(buf), "Unable to get render model interface: %s", vr::VR_GetVRInitErrorAsEnglishDescription(eError));
 		return false;
 	}
+
 	_strTrackingSystemName = "No Driver";
 	_strTrackingSystemModelNumber = "No Display";
 
 	_strTrackingSystemName = getTrackedDeviceString(_pHMD, vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_TrackingSystemName_String);
 	_strTrackingSystemModelNumber = getTrackedDeviceString(_pHMD, vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_ModelNumber_String);
 
-	_fNearClip = 0.1f;
-	_fFarClip = 30.0f;
+	// TODO: parameterize!
+	nearClip = 0.1f;
+	farClip = 30.0f;
 
 	_bIsGLInit = initGL();
 	if (!_bIsGLInit)
@@ -371,15 +480,42 @@ bool ofxOpenVR::init()
 		return false;
 	}
 
+	// Init tracked camera
+	trackedCamera = vr::VRTrackedCamera();
+	
+	if (!trackedCamera) {
+		ofLogError() << "Unable to get Tracked Camera interface.";
+		return false;
+	}
+
+	bool bHasCamera = false;
+	vr::EVRTrackedCameraError nCameraError = trackedCamera->HasCamera(vr::k_unTrackedDeviceIndex_Hmd, &bHasCamera);
+	
+
+
+	if (nCameraError != vr::VRTrackedCameraError_None || !bHasCamera) {
+		ofLogError() << "No Tracked Camera Available! ( " << trackedCamera->GetCameraErrorNameFromEnum(nCameraError) << ")";
+		return false;
+	}
+
+	vr::ETrackedPropertyError propertyError;
+	char buffer[128];
+	_pHMD->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_CameraFirmwareDescription_String, buffer, sizeof(buffer), &propertyError);
+	if (propertyError != vr::TrackedProp_Success) {
+		ofLogError() << "Failed to get tracked camera firmware description!\n";
+		return false;
+	}
+
+	ofLogNotice() << "Camera Firmware: " << buffer;
+	if (bHasCamera) startVideo();
+
 	return true;
 }
 
 //--------------------------------------------------------------
 bool ofxOpenVR::initGL()
 {
-	if (!createAllShaders())
-		return false;
-
+	createAllShaders();
 	setupCameras();
 
 	if (!setupStereoRenderTargets())
@@ -409,156 +545,21 @@ bool ofxOpenVR::initCompositor()
 //--------------------------------------------------------------
 bool ofxOpenVR::createAllShaders()
 {
-	// Controller transform shader
-	string vertex = "#version 410\n";
-	vertex += STRINGIFY(
-						uniform mat4 matrix;
-						layout(location = 0) in vec4 position;
-						layout(location = 1) in vec3 v3ColorIn;
-						out vec4 v4Color;
-						void main()
-						{
-							v4Color.xyz = v3ColorIn; v4Color.a = 1.0;
-							gl_Position = matrix * position;
-						}
-					);
-
-	string fragment = "#version 410\n";
-	fragment += STRINGIFY(
-						in vec4 v4Color;
-						out vec4 outputColor;
-						void main()
-						{
-							outputColor = v4Color;
-						}
-					);
-
-	_controllersTransformShader.setupShaderFromSource(GL_VERTEX_SHADER, vertex);
-	_controllersTransformShader.setupShaderFromSource(GL_FRAGMENT_SHADER, fragment);
-	_controllersTransformShader.bindDefaults();
-	_controllersTransformShader.linkProgram();
-
-	// Lens shader - render distortion
-	vertex = "#version 410\n";
-	vertex += STRINGIFY(
-						layout(location = 0) in vec4 position;
-						layout(location = 1) in vec2 v2UVredIn;
-						layout(location = 2) in vec2 v2UVGreenIn;
-						layout(location = 3) in vec2 v2UVblueIn;
-						noperspective  out vec2 v2UVred;
-						noperspective  out vec2 v2UVgreen;
-						noperspective  out vec2 v2UVblue;
-						void main()
-						{
-							v2UVred = v2UVredIn;
-							v2UVgreen = v2UVGreenIn;
-							v2UVblue = v2UVblueIn;
-							gl_Position = position;
-						}
-					);
-
-	fragment = "#version 410\n";
-	fragment += STRINGIFY(
-						uniform sampler2D mytexture;
-
-						noperspective  in vec2 v2UVred;
-						noperspective  in vec2 v2UVgreen;
-						noperspective  in vec2 v2UVblue;
-
-						out vec4 outputColor;
-
-						void main()
-						{
-							float fBoundsCheck = ((dot(vec2(lessThan(v2UVgreen.xy, vec2(0.05, 0.05))), vec2(1.0, 1.0)) + dot(vec2(greaterThan(v2UVgreen.xy, vec2(0.95, 0.95))), vec2(1.0, 1.0))));
-							if (fBoundsCheck > 1.0)
-							{
-								outputColor = vec4(0, 0, 0, 1.0);
-							}
-							else
-							{
-								float red = texture(mytexture, v2UVred).x;
-								float green = texture(mytexture, v2UVgreen).y;
-								float blue = texture(mytexture, v2UVblue).z;
-								outputColor = vec4(red, green, blue, 1.0);
-							}
-						}
-					);
-
-	_lensShader.setupShaderFromSource(GL_VERTEX_SHADER, vertex);
-	_lensShader.setupShaderFromSource(GL_FRAGMENT_SHADER, fragment);
-	_lensShader.bindDefaults();
-	_lensShader.linkProgram();
-
-	// Render models
-	vertex = "#version 410\n";
-	vertex += STRINGIFY(
-						uniform mat4 matrix;
-						layout(location = 0) in vec4 position;
-						layout(location = 1) in vec3 v3NormalIn;
-						layout(location = 2) in vec2 v2TexCoordsIn;
-						out vec2 v2TexCoord;
-						void main()
-						{
-							v2TexCoord = v2TexCoordsIn;
-							gl_Position = matrix * vec4(position.xyz, 1);
-						}
-					);
-
-	fragment = "#version 410\n";
-	fragment += STRINGIFY(
-							uniform sampler2D diffuse;
-							in vec2 v2TexCoord;
-							out vec4 outputColor;
-							void main()
-							{
-							   outputColor = texture( diffuse, v2TexCoord);
-							}
-						);
-
-	_renderModelsShader.setupShaderFromSource(GL_VERTEX_SHADER, vertex);
-	_renderModelsShader.setupShaderFromSource(GL_FRAGMENT_SHADER, fragment);
-	_renderModelsShader.bindDefaults();
-	_renderModelsShader.linkProgram();
+	const std::string shaderPath("../../../../../addons/ofxOpenVR/shader/");
+	_controllersTransformShader.load(shaderPath + "controllerTransform");
+	_lensShader.load(shaderPath + "lens");
+	_renderModelsShader.load(shaderPath + "renderModel");
+	contrast_shader_.load(shaderPath + "contrast");
 
 	return true;
 }
 
 //--------------------------------------------------------------
-bool ofxOpenVR::createFrameBuffer(int nWidth, int nHeight, FramebufferDesc &framebufferDesc)
+bool ofxOpenVR::createFrameBuffer(int nWidth, int nHeight, vr::Hmd_Eye eye)
 {
-	// Still using direct OpenGL calls to create the FBO as OF does not allow the create of GL_TEXTURE_2D_MULTISAMPLE texture.
-	
-	glGenFramebuffers(1, &framebufferDesc._nRenderFramebufferId);
-	glBindFramebuffer(GL_FRAMEBUFFER, framebufferDesc._nRenderFramebufferId);
-
-	glGenRenderbuffers(1, &framebufferDesc._nDepthBufferId);
-	glBindRenderbuffer(GL_RENDERBUFFER, framebufferDesc._nDepthBufferId);
-	glRenderbufferStorageMultisample(GL_RENDERBUFFER, 4, GL_DEPTH_COMPONENT, nWidth, nHeight);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, framebufferDesc._nDepthBufferId);
-
-	glGenTextures(1, &framebufferDesc._nRenderTextureId);
-	glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, framebufferDesc._nRenderTextureId);
-	glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8, nWidth, nHeight, true);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D_MULTISAMPLE, framebufferDesc._nRenderTextureId, 0);
-
-	glGenFramebuffers(1, &framebufferDesc._nResolveFramebufferId);
-	glBindFramebuffer(GL_FRAMEBUFFER, framebufferDesc._nResolveFramebufferId);
-
-	glGenTextures(1, &framebufferDesc._nResolveTextureId);
-	glBindTexture(GL_TEXTURE_2D, framebufferDesc._nResolveTextureId);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, nWidth, nHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, framebufferDesc._nResolveTextureId, 0);
-
-	// check FBO status
-	GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-	if (status != GL_FRAMEBUFFER_COMPLETE)
-	{
-		return false;
-	}
-
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	ofDisableArbTex();
+	eyeFbo[eye].allocate(nWidth, nHeight, GL_RGBA);
+	ofEnableArbTex();
 
 	return true;
 }
@@ -566,16 +567,13 @@ bool ofxOpenVR::createFrameBuffer(int nWidth, int nHeight, FramebufferDesc &fram
 //--------------------------------------------------------------
 bool ofxOpenVR::setupStereoRenderTargets()
 {
-	if (!_pHMD)
-		return false;
-
+	if (!_pHMD) return false;
 	_pHMD->GetRecommendedRenderTargetSize(&_nRenderWidth, &_nRenderHeight);
 
-	if (!createFrameBuffer(_nRenderWidth, _nRenderHeight, leftEyeDesc))
-		return false;
+	ofLogNotice() << "render size (per eye): " << _nRenderWidth << " x " << _nRenderHeight;
 
-	if (!createFrameBuffer(_nRenderWidth, _nRenderHeight, rightEyeDesc))
-		return false;
+	if (!createFrameBuffer(_nRenderWidth, _nRenderHeight, vr::Eye_Left)) return false;
+	if (!createFrameBuffer(_nRenderWidth, _nRenderHeight, vr::Eye_Right)) return false;
 
 	return true;
 }
@@ -716,17 +714,16 @@ void ofxOpenVR::setupDistortion()
 //--------------------------------------------------------------
 void ofxOpenVR::setupCameras()
 {
-	_mat4ProjectionLeft = getHMDMatrixProjectionEye(vr::Eye_Left);
-	_mat4ProjectionRight = getHMDMatrixProjectionEye(vr::Eye_Right);
-	_mat4eyePosLeft = getHMDMatrixPoseEye(vr::Eye_Left);
-	_mat4eyePosRight = getHMDMatrixPoseEye(vr::Eye_Right);
+	_mat4Projection[vr::Eye_Left] = getHMDMatrixProjectionEye(vr::Eye_Left);
+	_mat4Projection[vr::Eye_Right] = getHMDMatrixProjectionEye(vr::Eye_Right);
+	_mat4eyePos[vr::Eye_Left] = getHMDMatrixPoseEye(vr::Eye_Left);
+	_mat4eyePos[vr::Eye_Right] = getHMDMatrixPoseEye(vr::Eye_Right);
 }
 
 //--------------------------------------------------------------
 void ofxOpenVR::updateDevicesMatrixPose()
 {
-	if (!_pHMD)
-		return;
+	if (!_pHMD) return;
 	
 	// Reset some vars.
 	_iValidPoseCount = 0;
@@ -790,6 +787,11 @@ void ofxOpenVR::updateDevicesMatrixPose()
 					break;
 			}
 
+			// Store HMD matrix. 
+			if (_pHMD->GetTrackedDeviceClass(nDevice) == vr::TrackedDeviceClass_HMD) {
+				_mat4HMDPose_world = _rmat4DevicePose[nDevice];
+			}
+
 			// Store controllers' ID and matrix. 
 			if (_pHMD->GetTrackedDeviceClass(nDevice) == vr::TrackedDeviceClass_Controller) {
 				_iTrackedControllerCount += 1;
@@ -822,6 +824,7 @@ void ofxOpenVR::updateDevicesMatrixPose()
 //--------------------------------------------------------------
 void ofxOpenVR::handleInput()
 {
+	controller_events_.clear();
 	// Process SteamVR events
 	vr::VREvent_t event;
 	while (_pHMD->PollNextEvent(&event, sizeof(event)))
@@ -830,17 +833,32 @@ void ofxOpenVR::handleInput()
 	}
 }
 
+//--------------------------------------------------------------
+bool ofxOpenVR::hasControllerEvents() {
+	return controller_events_.size() > 0;
+}
+
+//--------------------------------------------------------------
+bool ofxOpenVR::getNextControllerEvent(ofxOpenVRControllerEvent &event) {
+	if (hasControllerEvents()) {
+		event = controller_events_[0];
+		controller_events_.erase(controller_events_.begin());
+		return true;
+	}
+	return false;
+}
+
 
 //--------------------------------------------------------------
 // Purpose: Processes a single VR event
 //--------------------------------------------------------------
 void ofxOpenVR::processVREvent(const vr::VREvent_t & event)
-{	
+{		
 	// Check device's class.
 	switch (_pHMD->GetTrackedDeviceClass(event.trackedDeviceIndex))
 	{
 		case vr::TrackedDeviceClass_Controller:
-			ofxOpenVRControllerEventArgs _args;
+			ofxOpenVRControllerEvent _args;
 
 			// Controller's role.
 			if (_pHMD->GetControllerRoleForTrackedDeviceIndex(event.trackedDeviceIndex) == vr::TrackedControllerRole_LeftHand) {
@@ -923,7 +941,8 @@ void ofxOpenVR::processVREvent(const vr::VREvent_t & event)
 				break;
 			}
 
-			ofNotifyEvent(ofxOpenVRControllerEvent, _args);
+			controller_events_.push_back(_args);		//Send to queue
+			//ofNotifyEvent(ofxOpenVRControllerEvent, _args);
 			break;
 
 		case vr::TrackedDeviceClass_HMD:
@@ -968,47 +987,126 @@ void ofxOpenVR::processVREvent(const vr::VREvent_t & event)
 //--------------------------------------------------------------
 void ofxOpenVR::renderStereoTargets()
 {
-	glClearColor(_clearColor.r, _clearColor.g, _clearColor.b, _clearColor.a);
-	glEnable(GL_MULTISAMPLE);
+	
+	//glEnable(GL_MULTISAMPLE);
+	bool b = cameraImg.isAllocated();
+	float camScale = 1.8;
 
 	// Left Eye
-	glBindFramebuffer(GL_FRAMEBUFFER, leftEyeDesc._nRenderFramebufferId);
-	glViewport(0, 0, _nRenderWidth, _nRenderHeight);
+	eyeFbo[vr::Eye_Left].begin();
+	ofClear(_clearColor);
+	ofEnableAlphaBlending();
+	if (b) {
+		ofPushMatrix();
+		ofTranslate(eyeFbo[vr::Eye_Left].getWidth()/2, eyeFbo[vr::Eye_Left].getHeight()/2);
+		ofScale(camScale);
+		ofTranslate(- camFbo[vr::Eye_Left].getWidth()/2, -camFbo[vr::Eye_Left].getHeight()/2);
+		camFbo[vr::Eye_Left].draw(0, 0);
+		ofPopMatrix();
+	}
+	
 	renderScene(vr::Eye_Left);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-	glDisable(GL_MULTISAMPLE);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, leftEyeDesc._nRenderFramebufferId);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, leftEyeDesc._nResolveFramebufferId);
-
-	glBlitFramebuffer(0, 0, _nRenderWidth, _nRenderHeight, 0, 0, _nRenderWidth, _nRenderHeight,
-		GL_COLOR_BUFFER_BIT,
-		GL_LINEAR);
-
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
-
-
-	glEnable(GL_MULTISAMPLE);
+	ofDisableAlphaBlending();
+	eyeFbo[vr::Eye_Left].end();
 
 	// Right Eye
-	glBindFramebuffer(GL_FRAMEBUFFER, rightEyeDesc._nRenderFramebufferId);
-	glViewport(0, 0, _nRenderWidth, _nRenderHeight);
+	eyeFbo[vr::Eye_Right].begin();
+	ofClear(_clearColor);
+	ofEnableAlphaBlending();
+	if (b) {
+		ofPushMatrix();
+		ofTranslate(eyeFbo[vr::Eye_Right].getWidth() / 2, eyeFbo[vr::Eye_Right].getHeight() / 2);
+		ofScale(camScale);
+		ofTranslate(-camFbo[vr::Eye_Right].getWidth() / 2, -camFbo[vr::Eye_Right].getHeight() / 2);
+		camFbo[vr::Eye_Right].draw(0, 0);
+		ofPopMatrix();
+	}
 	renderScene(vr::Eye_Right);
-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	ofDisableAlphaBlending();
+	eyeFbo[vr::Eye_Right].end();
+}
 
-	glDisable(GL_MULTISAMPLE);
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, rightEyeDesc._nRenderFramebufferId);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rightEyeDesc._nResolveFramebufferId);
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::get_center(const glm::mat4x4& pose) {
+	return glm::vec3(pose * glm::vec4(0, 0, 0, 1));
+}
 
-	glBlitFramebuffer(0, 0, _nRenderWidth, _nRenderHeight, 0, 0, _nRenderWidth, _nRenderHeight,
-		GL_COLOR_BUFFER_BIT,
-		GL_LINEAR);
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::get_axe(const glm::mat4x4 &pose, int axe) {	//axe 0,1,2 - OX,OY,OZ result is normalized
+	glm::vec4 center(0, 0, 0, 1);
+	glm::vec4 point = center;
+	point[axe] += 0.05f;
+	point = pose * point - pose * center;
+	return glm::normalize(glm::vec3(point));
+}
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+bool ofxOpenVR::startVideo() {
+	ofLogNotice() << "StartVideoPreview()";
+
+	// Allocate for camera frame buffer requirements
+	uint32_t nCameraFrameBufferSize = 0;
+	if (trackedCamera->GetCameraFrameSize(vr::k_unTrackedDeviceIndex_Hmd, vr::VRTrackedCameraFrameType_Undistorted, 
+		&m_nCameraFrameWidth,
+		&m_nCameraFrameHeight,
+		&nCameraFrameBufferSize
+	) != vr::VRTrackedCameraError_None) {
+		ofLogError() << "GetCameraFrameBounds() Failed!";
+		return false;
+	}
+	ofLogNotice() << "camera input size: " << m_nCameraFrameWidth << " x " << m_nCameraFrameHeight;
+
+	if (nCameraFrameBufferSize && nCameraFrameBufferSize != m_nCameraFrameBufferSize) {
+		delete[] m_pCameraFrameBuffer;
+		m_nCameraFrameBufferSize = nCameraFrameBufferSize;
+		m_pCameraFrameBuffer = new uint8_t[m_nCameraFrameBufferSize];
+		memset(m_pCameraFrameBuffer, 0, m_nCameraFrameBufferSize);
+	}
+
+	m_nLastFrameSequence = 0;
+
+	trackedCamera->AcquireVideoStreamingService(vr::k_unTrackedDeviceIndex_Hmd, &trackedCameraHandle);
+	if (trackedCameraHandle == INVALID_TRACKED_CAMERA_HANDLE) {
+		ofLogError() << "AcquireVideoStreamingService() Failed!";
+		return false;
+	}
+
+	camFbo[vr::Eye_Left].allocate(m_nCameraFrameWidth, m_nCameraFrameHeight/2, GL_RGB);
+	camFbo[vr::Eye_Right].allocate(m_nCameraFrameWidth, m_nCameraFrameHeight/2, GL_RGB);
+
+	return true;
+}
+
+void ofxOpenVR::closeVideo() {
+	ofLogNotice() << "StopVideoPreview()";
+
+	trackedCamera->ReleaseVideoStreamingService(trackedCameraHandle);
+	trackedCameraHandle = INVALID_TRACKED_CAMERA_HANDLE;
+}
+
+//--------------------------------------------------------------
+glm::mat4x4 ofxOpenVR::getHDMPose() {
+	return _mat4HMDPose_world;
+}
+
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::getHDMCenter() {
+	return get_center(getHDMPose());
+}
+
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::getHDMAxe(int axe) {	//axe 0,1,2 - OX,OY,OZ result is normalized
+	return get_axe(getHDMPose(), axe);
+}
+
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::getControllerCenter(int controller) {
+	return get_center(getControllerPose(controller));
+}
+
+//--------------------------------------------------------------
+glm::vec3 ofxOpenVR::getControllerAxe(int controller, int axe) {	//axe 0,1,2 - OX,OY,OZ, result is normalized
+	return get_axe(getControllerPose(controller), axe);
 }
 
 //--------------------------------------------------------------
@@ -1017,9 +1115,9 @@ void ofxOpenVR::renderStereoTargets()
 void ofxOpenVR::drawControllers()
 {
 	// Don't draw controllers if somebody else has input focus
-	if (_pHMD->IsInputFocusCapturedByAnotherProcess()) {
+	/*if (_pHMD->IsInputFocusCapturedByAnotherProcess()) {
 		return;
-	}
+	}*/
 		
 	_controllersVbo.clear();
 	
@@ -1068,13 +1166,13 @@ void ofxOpenVR::drawControllers()
 //--------------------------------------------------------------
 void ofxOpenVR::renderScene(vr::Hmd_Eye nEye)
 {
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-	glEnable(GL_DEPTH_TEST);
+	
+	ofEnableDepthTest();
 
 	// Don't continue if somebody else has input focus
-	if (_pHMD->IsInputFocusCapturedByAnotherProcess()) {
+	/*if (_pHMD->IsInputFocusCapturedByAnotherProcess()) {
 		return;
-	}
+	}*/
 
 	// Draw the controllers
 	if (_bDrawControllers) {
@@ -1098,9 +1196,9 @@ void ofxOpenVR::renderScene(vr::Hmd_Eye nEye)
 				continue;
 			}
 				
-			if (_pHMD->IsInputFocusCapturedByAnotherProcess() && _pHMD->GetTrackedDeviceClass(unTrackedDevice) == vr::TrackedDeviceClass_Controller) {
+			/*if (_pHMD->IsInputFocusCapturedByAnotherProcess() && _pHMD->GetTrackedDeviceClass(unTrackedDevice) == vr::TrackedDeviceClass_Controller) {
 				continue;
-			}
+			}*/
 				
 			glm::mat4x4 matMVP = getCurrentViewProjectionMatrix(nEye) * _rmat4DevicePose[unTrackedDevice];
 
@@ -1113,7 +1211,71 @@ void ofxOpenVR::renderScene(vr::Hmd_Eye nEye)
 
 	// User's render function
 	_callableRenderFunction(nEye);
+
+	ofDisableDepthTest();
+
 }
+
+//--------------------------------------------------------------
+//NOTE: currently size of rendering texture is limited render_width,render_heigth (SOME BUG)
+void ofxOpenVR::draw_using_contrast_shader(float w, float h, float contrast0, float contrast1, int eye) {
+	ofShader &shader = contrast_shader_;
+	shader.begin();
+	shader.setUniform1f("contrast0", contrast0);
+	shader.setUniform1f("contrast1", contrast1);
+
+
+	draw_using_binded_shader(w, h, eye);
+
+	shader.end();
+}
+
+//--------------------------------------------------------------
+//NOTE: currently size of rendering texture is limited render_width,render_heigth (SOME BUG)
+void ofxOpenVR::draw_using_binded_shader(float w, float h, int eye) {
+	//ofDisableArbTex();
+
+	glDisable(GL_DEPTH_TEST);
+	glViewport(0, 0, ofGetWidth(), ofGetHeight());
+
+	//ofPushMatrix();
+	float W = render_width();
+	float H = render_height();
+	W = max(W, 1.0f);
+	H = max(H, 1.0f);
+	//float scl = min(w / W, h / H);  //FIT
+	float scl = max(w / W, h / H);	//CROP  TODO!! где-то глюк настроек текстуры, не раст€гивает текстуру больше render_w
+	float w1 = W * scl;
+	float h1 = H * scl;
+	float x0 = (w - w1) / 2;
+	float y0 = (h - h1) / 2;
+
+	int texw = 1; //W
+	int texh = 1; //H;
+	ofMesh mesh;
+	mesh.addVertex(ofPoint(x0, y0));
+	mesh.addVertex(ofPoint(x0+w1, y0));
+	mesh.addVertex(ofPoint(x0+w1, y0+h1));
+	mesh.addVertex(ofPoint(x0, y0+h1));
+	mesh.addTexCoord(ofVec2f(0, 1));
+	mesh.addTexCoord(ofVec2f(texw, 1));
+	mesh.addTexCoord(ofVec2f(texw, 0));
+	mesh.addTexCoord(ofVec2f(0, 0));
+	mesh.addTriangle(0, 1, 2);
+	mesh.addTriangle(0, 2, 3);
+
+	GLuint texture_id = eyeFbo[eye].getTexture().getTextureData().textureID;
+	glBindTexture(GL_TEXTURE_2D, texture_id);
+	//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	//glActiveTexture(GL_TEXTURE0);
+
+	mesh.drawFaces();
+	
+}
+
 
 //--------------------------------------------------------------
 void ofxOpenVR::renderDistortion()
@@ -1125,20 +1287,14 @@ void ofxOpenVR::renderDistortion()
 	_lensShader.begin();
 
 	//render left lens (first half of index array )
-	glBindTexture(GL_TEXTURE_2D, leftEyeDesc._nResolveTextureId);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	eyeFbo[vr::Eye_Left].getTexture().bind();
 	glDrawElements(GL_TRIANGLES, _uiIndexSize / 2, GL_UNSIGNED_SHORT, 0);
+	eyeFbo[vr::Eye_Left].getTexture().unbind();
 
 	//render right lens (second half of index array )
-	glBindTexture(GL_TEXTURE_2D, rightEyeDesc._nResolveTextureId);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	eyeFbo[vr::Eye_Right].getTexture().bind();
 	glDrawElements(GL_TRIANGLES, _uiIndexSize / 2, GL_UNSIGNED_SHORT, (const void *)(_uiIndexSize));
+	eyeFbo[vr::Eye_Right].getTexture().unbind();
 
 	glBindVertexArray(0);
 	_lensShader.end();
@@ -1157,13 +1313,12 @@ void ofxOpenVR::drawDebugInfo(float x, float y)
 //--------------------------------------------------------------
 glm::mat4x4 ofxOpenVR::convertSteamVRMatrixToMatrix4(const vr::HmdMatrix34_t &matPose)
 {
-	glm::mat4x4 matrixObj(
+	return glm::mat4x4(
 		matPose.m[0][0], matPose.m[1][0], matPose.m[2][0], 0.0,
 		matPose.m[0][1], matPose.m[1][1], matPose.m[2][1], 0.0,
 		matPose.m[0][2], matPose.m[1][2], matPose.m[2][2], 0.0,
 		matPose.m[0][3], matPose.m[1][3], matPose.m[2][3], 1.0f
-	);
-	return matrixObj;
+	);;
 }
 
 //--------------------------------------------------------------
@@ -1253,7 +1408,7 @@ void ofxOpenVR::setupRenderModelForTrackedDevice(vr::TrackedDeviceIndex_t unTrac
 		
 	// try to find a model we've already set up
 	std::string sRenderModelName = getTrackedDeviceString(_pHMD, unTrackedDeviceIndex, vr::Prop_RenderModelName_String);
-	CGLRenderModel *pRenderModel = findOrLoadRenderModel(sRenderModelName.c_str());
+	CGLRenderModel *pRenderModel = findOrLoadRenderModel(sRenderModelName.c_str());	
 	if (!pRenderModel) {
 		std::string sTrackingSystemName = getTrackedDeviceString(_pHMD, unTrackedDeviceIndex, vr::Prop_TrackingSystemName_String);
 		printf("Unable to load render model for tracked device %d (%s.%s)", unTrackedDeviceIndex, sTrackingSystemName.c_str(), sRenderModelName.c_str());
@@ -1277,6 +1432,11 @@ void ofxOpenVR::setupRenderModels()
 	for (uint32_t unTrackedDevice = vr::k_unTrackedDeviceIndex_Hmd + 1; unTrackedDevice < vr::k_unMaxTrackedDeviceCount; unTrackedDevice++) {
 		if (!_pHMD->IsTrackedDeviceConnected(unTrackedDevice)) {
 			continue;
+		}
+
+		//do not show bases!
+		if (_pHMD->GetTrackedDeviceClass(unTrackedDevice) == vr::ETrackedDeviceClass::TrackedDeviceClass_TrackingReference) {
+			continue;	
 		}
 		
 		setupRenderModelForTrackedDevice(unTrackedDevice);
