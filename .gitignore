@@ -37,3 +37,36 @@ example-drawing/bin/*
 !example-drawing/bin/data
 example-360Player/bin/*
 !example-360Player/bin/data
+
+# openFrameworks: commit src/, bin/data/ and addons.make only.
+# Regenerate IDE projects with projectGenerator.
+*.xcodeproj/
+*.xcworkspace/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+.vscode/
+*/Makefile
+*/config.make
+*/Project.xcconfig
+*/openFrameworks-Info.plist
+*/of.entitlements
+*/icon.rc
+
+# Build output (bin/data is kept)
+*/bin/*
+!*/bin/data/
+*.o
+*.app/
+*.exe
+*.pdb
+*.ilk
+*.exp
+
+# OS / editor
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+*.swp
+.idea/

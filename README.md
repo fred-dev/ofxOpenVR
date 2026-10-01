@@ -1,6 +1,9 @@
 ofxOpenVR 
 ====================
 
+> **About this fork:** Fork of [smallfly/ofxOpenVR](https://github.com/smallfly/ofxOpenVR). Adds haptics, an OpenVR SDK update (1.0.11), a 360 player fix and a right-eye clear fix (2017-2020).
+
+
 Implementation of Valve Software's [OpenVR](https://github.com/ValveSoftware/openvr) API.
 
 ## Usage
